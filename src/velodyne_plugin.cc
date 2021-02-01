@@ -3,7 +3,14 @@
 
 #include <gazebo/gazebo.hh>
 #include <gazebo/physics/physics.hh>
+#include <thread>
+#include "ros/ros.h"
+#include "ros/callback_queue.h"
+#include "ros/subscribe_options.h"
+#include "std_msgs/Float32.h"
+
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~//
+
 namespace gazebo
 {
   /// \brief A plugin to control a Velodyne sensor.
@@ -66,8 +73,34 @@ namespace gazebo
     // Subscribe to the topic, and register a callback
     this->sub = this->node->Subscribe(topicName,
                                       &VelodynePlugin::OnMsg, this);
-
+    //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~//
+    // Initialize ros, if it has not already bee initialized.
+    if (!ros::isInitialized())
+    {
+      int argc = 0;
+      char **argv = NULL;
+      ros::init(argc, argv, "gazebo_client",
+          ros::init_options::NoSigintHandler);
     }
+
+    // Create our ROS node. This acts in a similar manner to
+    // the Gazebo node
+    this->rosNode.reset(new ros::NodeHandle("gazebo_client"));
+
+    // Create a named topic, and subscribe to it.
+    ros::SubscribeOptions so =
+                              ros::SubscribeOptions::create<std_msgs::Float32>(
+                                "/" + this->model->GetName() + "/vel_cmd",
+                               1,
+                               boost::bind(&VelodynePlugin::OnRosMsg, this, _1),
+                               ros::VoidPtr(), &this->rosQueue);
+    this->rosSub = this->rosNode->subscribe(so);
+
+    // Spin up the queue helper thread.
+    this->rosQueueThread =
+                      std::thread(std::bind(&VelodynePlugin::QueueThread, this));
+    //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~//
+    }//close load
 
     public: void SetVelocity(const double &_vel)
     {
@@ -83,7 +116,22 @@ namespace gazebo
     {
       this->SetVelocity(_msg->x());
     }
+    //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~//
+    public: void OnRosMsg(const std_msgs::Float32ConstPtr &_msg)
+    {
+      this->SetVelocity(_msg->data);
+    }
 
+    /// \brief ROS helper function that processes messages
+    private: void QueueThread()
+    {
+      static const double timeout = 0.01;
+      while (this->rosNode->ok())
+      {
+        this->rosQueue.callAvailable(ros::WallDuration(timeout));
+      }
+    }
+    //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~//
     /// \brief A node used for transport
     private: transport::NodePtr node;
 
@@ -98,6 +146,20 @@ namespace gazebo
 
     /// \brief A PID controller for the joint.
     private: common::PID pid;
+
+    //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~//
+    /// \brief A node use for ROS transport
+    private: std::unique_ptr<ros::NodeHandle> rosNode;
+
+    /// \brief A ROS subscriber
+    private: ros::Subscriber rosSub;
+
+    /// \brief A ROS callbackqueue that helps process messages
+    private: ros::CallbackQueue rosQueue;
+
+    /// \brief A thread the keeps running the rosQueue
+    private: std::thread rosQueueThread;
+    //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~//
   };
 
   // Tell Gazebo about this plugin, so that Gazebo can call Load on this plugin.
